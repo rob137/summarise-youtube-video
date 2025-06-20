@@ -9,6 +9,9 @@ A command-line tool that extracts YouTube video transcripts and generates AI-pow
 - Generates brief, medium, and detailed summaries
 - Outputs in Org mode format with timestamped links
 - Cost tracking for API usage
+- Intelligent chunking to handle long videos
+- Retry logic with exponential backoff for reliability
+- Progress indicators with timing display
 - Works offline for basic transcript extraction
 
 ## Installation

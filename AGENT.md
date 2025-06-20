@@ -9,7 +9,10 @@
 ## Architecture
 - Single Python script (`summarise-video`) with YouTube transcript extraction and AI summarization
 - Dependencies: `yt-dlp` for transcript extraction, `requests` for Gemini API calls
-- Uses Gemini 1.5 Flash for transcript cleaning and Gemini 2.0 Flash for summarization
+- Uses Gemini 2.5 Pro for both transcript cleaning and summarization
+- Configurable 300s API timeout with retry logic and exponential backoff
+- Intelligent chunking (20k words max per chunk) to avoid token limits
+- Graceful handling of MAX_TOKENS responses with warnings
 - Outputs structured markdown with brief/medium/detailed summaries plus timestamped transcript
 
 ## Code Style

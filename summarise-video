@@ -306,7 +306,7 @@ class YouTubeTranscriptSummarizer:
         timestamp_seconds = int(seconds)
         return f"https://www.youtube.com/watch?v={video_id}&t={timestamp_seconds}s"
     
-    def chunk_transcript(self, transcript: List[Dict], max_chunk_words: int = 25000) -> List[List[Dict]]:
+    def chunk_transcript(self, transcript: List[Dict], max_chunk_words: int = 45000) -> List[List[Dict]]:
         """Split transcript into manageable chunks for AI processing (based on word count)."""
         chunks = []
         current_chunk = []
@@ -354,7 +354,7 @@ Return only the cleaned text without any additional formatting or commentary."""
                 }],
                 "generationConfig": {
                     "temperature": 0.1,
-                    "maxOutputTokens": 8000
+                    "maxOutputTokens": 60000
                 }
             }
             
