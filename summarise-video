@@ -12,6 +12,8 @@ import json
 import argparse
 import subprocess
 import tempfile
+import time
+import threading
 from urllib.parse import urlparse, parse_qs
 from typing import List, Dict, Optional, Tuple
 import requests
@@ -23,6 +25,11 @@ class YouTubeTranscriptSummarizer:
         self.gemini_base_url = "https://generativelanguage.googleapis.com/v1beta/models"
         self.cleaning_model = "gemini-2.5-pro"
         self.summary_model = "gemini-2.5-pro"
+        self.max_retries = 3
+        self.base_delay = 1
+        self.start_time = None
+        self.progress_timer = None
+        self.stop_progress = False
         
         # Cost tracking (USD per 1M tokens)
         self.model_costs = {
@@ -35,6 +42,73 @@ class YouTubeTranscriptSummarizer:
             "summary_output_tokens": 0,
             "total_cost": 0.0
         }
+    
+    def _start_progress_timer(self, operation_name: str):
+        """Start a progress timer that shows elapsed time."""
+        self.start_time = time.time()
+        self.stop_progress = False
+        
+        def show_progress():
+            while not self.stop_progress:
+                elapsed = time.time() - self.start_time
+                minutes = int(elapsed // 60)
+                seconds = int(elapsed % 60)
+                print(f"\r{operation_name}... ({minutes:02d}:{seconds:02d})", end="", flush=True)
+                time.sleep(1)
+        
+        self.progress_timer = threading.Thread(target=show_progress, daemon=True)
+        self.progress_timer.start()
+    
+    def _stop_progress_timer(self):
+        """Stop the progress timer."""
+        if self.progress_timer:
+            self.stop_progress = True
+            elapsed = time.time() - self.start_time if self.start_time else 0
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            print(f"\r✓ Completed in {minutes:02d}:{seconds:02d}")
+        
+    def _make_api_request_with_retry(self, url: str, payload: dict, headers: dict, operation_name: str) -> requests.Response:
+        """Make API request with exponential backoff retry logic."""
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=180)
+                if response.status_code == 200:
+                    return response
+                elif response.status_code == 429:  # Rate limit
+                    if attempt < self.max_retries - 1:
+                        delay = self.base_delay * (2 ** attempt)
+                        print(f"Rate limit hit for {operation_name}, retrying in {delay}s...")
+                        time.sleep(delay)
+                        continue
+                else:
+                    print(f"API error for {operation_name}: HTTP {response.status_code}")
+                    if response.text:
+                        print(f"Response: {response.text}")
+                    response.raise_for_status()
+            except requests.exceptions.Timeout as e:
+                elapsed = time.time() - self.start_time if self.start_time else 0
+                minutes = int(elapsed // 60)
+                seconds = int(elapsed % 60)
+                if attempt < self.max_retries - 1:
+                    delay = self.base_delay * (2 ** attempt)
+                    print(f"\nTimeout after {minutes:02d}:{seconds:02d} for {operation_name} (attempt {attempt + 1}/{self.max_retries}), retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"\nFinal timeout after {minutes:02d}:{seconds:02d} for {operation_name} - all {self.max_retries} attempts failed")
+                    raise TimeoutError(f"{operation_name} timed out after {minutes:02d}:{seconds:02d} ({self.max_retries} attempts)")
+            except requests.exceptions.ConnectionError as e:
+                if attempt < self.max_retries - 1:
+                    delay = self.base_delay * (2 ** attempt)
+                    print(f"Connection error for {operation_name} (attempt {attempt + 1}/{self.max_retries}), retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    raise e
+        
+        # If we get here, all retries failed
+        raise Exception(f"All {self.max_retries} attempts failed for {operation_name}")
         
     def extract_video_id(self, url: str) -> Optional[str]:
         """Extract video ID from various YouTube URL formats."""
@@ -72,7 +146,10 @@ class YouTubeTranscriptSummarizer:
                 video_url
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                raise TimeoutError("Transcript extraction timed out after 30 seconds")
             
             if result.returncode != 0:
                 # Fallback: try with different subtitle options
@@ -85,7 +162,10 @@ class YouTubeTranscriptSummarizer:
                     '--output', temp_path.replace('.vtt', ''),
                     video_url
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                except subprocess.TimeoutExpired:
+                    raise TimeoutError("Transcript extraction (fallback) timed out after 30 seconds")
             
             # Find the generated subtitle files
             transcript_files = []
@@ -115,8 +195,8 @@ class YouTubeTranscriptSummarizer:
                 
             return transcript
             
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Transcript extraction timed out")
+        except TimeoutError as e:
+            raise RuntimeError(f"Transcript extraction failed: {str(e)}")
         except Exception as e:
             raise RuntimeError(f"Failed to extract transcript: {str(e)}")
     
@@ -249,8 +329,8 @@ class YouTubeTranscriptSummarizer:
     def clean_transcript_chunk(self, chunk: List[Dict], video_title: str = "") -> str:
         """Clean a chunk of transcript using Gemini API."""
         if not self.api_key:
-            # Fallback: basic cleaning without AI
-            return self.basic_clean_transcript(chunk)
+            print("Error: GEMINI_API_KEY is required for transcript cleaning")
+            sys.exit(1)
         
         try:
             # Prepare text for AI processing
@@ -277,11 +357,11 @@ Return only the cleaned text without any additional formatting or commentary."""
             }
             
             headers = {"Content-Type": "application/json"}
-            response = requests.post(
+            response = self._make_api_request_with_retry(
                 f"{self.gemini_base_url}/{self.cleaning_model}:generateContent?key={self.api_key}",
-                json=payload,
-                headers=headers,
-                timeout=30
+                payload,
+                headers,
+                "transcript cleaning"
             )
             
             if response.status_code == 200:
@@ -297,35 +377,22 @@ Return only the cleaned text without any additional formatting or commentary."""
                     
                     return result['candidates'][0]['content']['parts'][0]['text'].strip()
             
-            # Fallback to basic cleaning if API fails
-            return self.basic_clean_transcript(chunk)
+            print("Error: Failed to get valid response from Gemini API for transcript cleaning")
+            print("API returned a response but no valid content was found")
+            sys.exit(1)
             
         except Exception as e:
-            print(f"Warning: AI cleaning failed ({str(e)}), using basic cleaning")
-            return self.basic_clean_transcript(chunk)
-    
-    def basic_clean_transcript(self, chunk: List[Dict]) -> str:
-        """Basic transcript cleaning without AI."""
-        text = " ".join([entry['text'] for entry in chunk])
-        
-        # Remove common filler words and clean up
-        filler_words = ['um', 'uh', 'er', 'ah', 'like', 'you know', 'so basically', 'basically']
-        for filler in filler_words:
-            text = re.sub(r'\b' + re.escape(filler) + r'\b', '', text, flags=re.IGNORECASE)
-        
-        # Clean up extra spaces
-        text = ' '.join(text.split())
-        
-        return text
+            print(f"Error: Transcript cleaning failed - {str(e)}")
+            if hasattr(e, 'response') and e.response:
+                print(f"HTTP Status: {e.response.status_code}")
+                print(f"Response body: {e.response.text}")
+            sys.exit(1)
     
     def generate_all_summaries(self, clean_transcript: str, video_title: str = "") -> Dict[str, str]:
         """Generate all summary levels using a single prompt."""
         if not self.api_key:
-            return {
-                "brief": f"Summary not available (API key required). Original transcript length: {len(clean_transcript)} characters.",
-                "medium": f"Summary not available (API key required). Original transcript length: {len(clean_transcript)} characters.",
-                "detailed": f"Summary not available (API key required). Original transcript length: {len(clean_transcript)} characters."
-            }
+            print("Error: GEMINI_API_KEY is required for summary generation")
+            sys.exit(1)
         
         try:
             title_context = f"\n\nVideo title: {video_title}" if video_title else ""
@@ -359,11 +426,11 @@ DETAILED: [detailed summary with clear organization]"""
             }
             
             headers = {"Content-Type": "application/json"}
-            response = requests.post(
+            response = self._make_api_request_with_retry(
                 f"{self.gemini_base_url}/{self.summary_model}:generateContent?key={self.api_key}",
-                json=payload,
-                headers=headers,
-                timeout=30
+                payload,
+                headers,
+                "summary generation"
             )
             
             if response.status_code == 200:
@@ -380,15 +447,16 @@ DETAILED: [detailed summary with clear organization]"""
                     content = result['candidates'][0]['content']['parts'][0]['text'].strip()
                     return self.parse_multi_level_summary(content)
             
-            return {
-                "brief": "Summary generation failed. Original transcript available above.",
-                "medium": "Summary generation failed. Original transcript available above.",
-                "detailed": "Summary generation failed. Original transcript available above."
-            }
+            print("Error: Failed to get valid response from Gemini API for summary generation")
+            print("API returned a response but no valid content was found")
+            sys.exit(1)
             
         except Exception as e:
-            error_msg = f"Summary generation failed ({str(e)}). Original transcript available above."
-            return {"brief": error_msg, "medium": error_msg, "detailed": error_msg}
+            print(f"Error: Summary generation failed - {str(e)}")
+            if hasattr(e, 'response') and e.response:
+                print(f"HTTP Status: {e.response.status_code}")
+                print(f"Response body: {e.response.text}")
+            sys.exit(1)
     
     def parse_multi_level_summary(self, content: str) -> Dict[str, str]:
         """Parse the multi-level summary response."""
@@ -435,7 +503,11 @@ DETAILED: [detailed summary with clear organization]"""
         """Extract video title using yt-dlp."""
         try:
             cmd = ['yt-dlp', '--get-title', video_url]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            except subprocess.TimeoutExpired:
+                print("Video title extraction timed out after 10 seconds")
+                return "Unknown-Title"
             if result.returncode == 0:
                 title = result.stdout.strip()
                 # Clean title for filename
@@ -555,8 +627,9 @@ DETAILED: [detailed summary with clear organization]"""
     def process_video(self, video_url: str, output_file: Optional[str] = None) -> str:
         """Main processing function."""
         try:
-            print("Extracting transcript...")
+            self._start_progress_timer("Extracting transcript")
             transcript = self.get_transcript(video_url)
+            self._stop_progress_timer()
             
             if not transcript:
                 raise ValueError("No transcript found for this video")
@@ -564,23 +637,27 @@ DETAILED: [detailed summary with clear organization]"""
             print(f"Found {len(transcript)} transcript segments")
             
             # Get video title for context
+            self._start_progress_timer("Getting video title")
             video_title = self.get_video_title(video_url)
+            self._stop_progress_timer()
             
             # Chunk transcript for processing
-            print("Processing transcript...")
             chunks = self.chunk_transcript(transcript)
             cleaned_chunks = []
             
+            print(f"Processing transcript in {len(chunks)} chunks...")
             for i, chunk in enumerate(chunks):
-                print(f"Processing chunk {i+1}/{len(chunks)}...")
+                self._start_progress_timer(f"Processing chunk {i+1}/{len(chunks)}")
                 cleaned_text = self.clean_transcript_chunk(chunk, video_title)
+                self._stop_progress_timer()
                 cleaned_chunks.append(cleaned_text)
             
             clean_transcript = " ".join(cleaned_chunks)
             
             # Generate summaries
-            print("Generating summaries...")
+            self._start_progress_timer("Generating summaries")
             summaries = self.generate_all_summaries(clean_transcript, video_title)
+            self._stop_progress_timer()
             
             # Format output
             formatted_output = self.format_output(video_url, transcript, clean_transcript, summaries)
