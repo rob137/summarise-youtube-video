@@ -5,7 +5,7 @@ A command-line tool that extracts YouTube video transcripts and generates AI-pow
 ## Features
 
 - Extracts transcripts from YouTube videos using yt-dlp
-- Cleans up transcripts with AI (Gemini 2.5 Pro)
+- Cleans up transcripts with AI (Gemini 2.0 Flash for cleaning, Gemini 2.5 Pro for summaries)
 - Generates brief, medium, and detailed summaries
 - Outputs in Org mode format with timestamped links
 - Cost tracking for API usage
