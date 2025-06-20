@@ -81,13 +81,21 @@ Here's what the output looks like when run on the first ever YouTube video "Me a
 ./summarise-video https://www.youtube.com/watch?v=jNQXAC9IVRw
 ```
 
-**Brief Summary:**
-The speaker, standing in front of the elephants at a zoo, makes the simple observation that their long trunks are cool.
+> **🔸 BRIEF SUMMARY:**
+> The speaker, standing in front of the elephants at the zoo, observes that the cool thing about them is their very long trunks.
+> 
+> **🔸 MEDIUM SUMMARY:**
+> The speaker begins by establishing his location at the zoo, specifically in front of the elephant enclosure. He shares a single, simple observation: the "cool thing" about the elephants is their "really long trunks." He then abruptly concludes his commentary, stating that this observation is "pretty much all there is to say," highlighting the brief and unadorned nature of his report.
+> 
+> **Cost Summary:**
+> - Cleaning: 141 input + 38 output tokens
+> - Summary: 171 input + 237 output tokens
+> - Total: 312 input + 275 output tokens
+> - Estimated cost: $0.0031 USD
+> 
+> Output saved to: `/Users/robertkirby/transcripts/youtube-transcript-Me-at-the-zoo.org`
 
-**Medium Summary:**
-In the video, the speaker is at the zoo, positioned in front of the elephant enclosure. He points out what he finds to be the most interesting feature: their "really, really, really long trunks." He expresses his simple appreciation by stating "that's cool" and concludes with "that's pretty much all there is to say."
-
-The full output includes detailed analysis and timestamped transcript with clickable YouTube links.
+The full output file includes detailed analysis and timestamped transcript with clickable YouTube links.
 
 ## API Key Setup
 
