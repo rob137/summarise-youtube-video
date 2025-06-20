@@ -27,6 +27,7 @@ class YouTubeTranscriptSummarizer:
         self.summary_model = "gemini-2.5-pro"
         self.max_retries = 3
         self.base_delay = 1
+        self.api_timeout = 300  # seconds
         self.start_time = None
         self.progress_timer = None
         self.stop_progress = False
@@ -53,7 +54,7 @@ class YouTubeTranscriptSummarizer:
                 elapsed = time.time() - self.start_time
                 minutes = int(elapsed // 60)
                 seconds = int(elapsed % 60)
-                print(f"\r{operation_name}... ({minutes:02d}:{seconds:02d})", end="", flush=True)
+                print(f"\r[{minutes:02d}:{seconds:02d}] {operation_name}...", end="", flush=True)
                 time.sleep(1)
         
         self.progress_timer = threading.Thread(target=show_progress, daemon=True)
@@ -66,13 +67,14 @@ class YouTubeTranscriptSummarizer:
             elapsed = time.time() - self.start_time if self.start_time else 0
             minutes = int(elapsed // 60)
             seconds = int(elapsed % 60)
-            print(f"\r✓ Completed in {minutes:02d}:{seconds:02d}")
+            print(f"\r[{minutes:02d}:{seconds:02d}] ✓ Completed")
         
     def _make_api_request_with_retry(self, url: str, payload: dict, headers: dict, operation_name: str) -> requests.Response:
         """Make API request with exponential backoff retry logic."""
+        print(f"Starting {operation_name} (timeout: {self.api_timeout}s)...")
         for attempt in range(self.max_retries):
             try:
-                response = requests.post(url, json=payload, headers=headers, timeout=180)
+                response = requests.post(url, json=payload, headers=headers, timeout=self.api_timeout)
                 if response.status_code == 200:
                     return response
                 elif response.status_code == 429:  # Rate limit
@@ -304,7 +306,7 @@ class YouTubeTranscriptSummarizer:
         timestamp_seconds = int(seconds)
         return f"https://www.youtube.com/watch?v={video_id}&t={timestamp_seconds}s"
     
-    def chunk_transcript(self, transcript: List[Dict], max_chunk_words: int = 100000) -> List[List[Dict]]:
+    def chunk_transcript(self, transcript: List[Dict], max_chunk_words: int = 20000) -> List[List[Dict]]:
         """Split transcript into manageable chunks for AI processing (based on word count)."""
         chunks = []
         current_chunk = []
@@ -352,7 +354,7 @@ Return only the cleaned text without any additional formatting or commentary."""
                 }],
                 "generationConfig": {
                     "temperature": 0.1,
-                    "maxOutputTokens": 2048
+                    "maxOutputTokens": 7000
                 }
             }
             
@@ -366,26 +368,51 @@ Return only the cleaned text without any additional formatting or commentary."""
             
             if response.status_code == 200:
                 result = response.json()
+                print(f"API Response structure: {json.dumps(result, indent=2)[:500]}...")
+                
                 if 'candidates' in result and result['candidates']:
-                    # Track token usage for cost calculation
-                    if 'usageMetadata' in result:
-                        input_tokens = result['usageMetadata'].get('promptTokenCount', 0)
-                        output_tokens = result['usageMetadata'].get('candidatesTokenCount', 0)
-                        self.usage_stats['cleaning_input_tokens'] += input_tokens
-                        self.usage_stats['cleaning_output_tokens'] += output_tokens
-                        self._update_cost('cleaning', input_tokens, output_tokens)
+                    candidate = result['candidates'][0]
                     
-                    return result['candidates'][0]['content']['parts'][0]['text'].strip()
+                    # Check for MAX_TOKENS finish reason
+                    if candidate.get('finishReason') == 'MAX_TOKENS':
+                        print(f"Warning: Response was truncated due to MAX_TOKENS limit. Consider reducing chunk size.")
+                        if 'content' in candidate and 'parts' in candidate['content'] and candidate['content']['parts']:
+                            # Still return the truncated response - it's better than nothing
+                            return candidate['content']['parts'][0]['text'].strip()
+                        else:
+                            print(f"Error: MAX_TOKENS response has no usable content: {candidate}")
+                            return ""
+                    
+                    if 'content' in candidate and 'parts' in candidate['content']:
+                        # Track token usage for cost calculation
+                        if 'usageMetadata' in result:
+                            input_tokens = result['usageMetadata'].get('promptTokenCount', 0)
+                            output_tokens = result['usageMetadata'].get('candidatesTokenCount', 0)
+                            self.usage_stats['cleaning_input_tokens'] += input_tokens
+                            self.usage_stats['cleaning_output_tokens'] += output_tokens
+                            self._update_cost('cleaning', input_tokens, output_tokens)
+                        
+                        return candidate['content']['parts'][0]['text'].strip()
+                    else:
+                        print(f"Error: Missing 'content' or 'parts' in candidate: {candidate}")
+                else:
+                    print(f"Error: No candidates found in API response: {result}")
+            else:
+                print(f"Error: API returned HTTP {response.status_code}")
+                print(f"Response body: {response.text}")
             
             print("Error: Failed to get valid response from Gemini API for transcript cleaning")
-            print("API returned a response but no valid content was found")
             sys.exit(1)
             
         except Exception as e:
             print(f"Error: Transcript cleaning failed - {str(e)}")
+            print(f"Exception type: {type(e).__name__}")
             if hasattr(e, 'response') and e.response:
                 print(f"HTTP Status: {e.response.status_code}")
+                print(f"Response headers: {dict(e.response.headers)}")
                 print(f"Response body: {e.response.text}")
+            import traceback
+            print(f"Full traceback:\n{traceback.format_exc()}")
             sys.exit(1)
     
     def generate_all_summaries(self, clean_transcript: str, video_title: str = "") -> Dict[str, str]:
