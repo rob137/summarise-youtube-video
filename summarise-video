@@ -1,0 +1,709 @@
+#!/usr/bin/env python3
+"""
+YouTube Transcript Summarizer
+A command-line tool that extracts YouTube video transcripts, 
+cleans them up with AI, and generates structured summaries.
+"""
+
+import sys
+import os
+import re
+import json
+import argparse
+import subprocess
+import tempfile
+from urllib.parse import urlparse, parse_qs
+from typing import List, Dict, Optional, Tuple
+import requests
+from datetime import datetime
+
+class YouTubeTranscriptSummarizer:
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv('GEMINI_API_KEY')
+        self.gemini_base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+        self.cleaning_model = "gemini-2.5-pro"
+        self.summary_model = "gemini-2.5-pro"
+        
+        # Cost tracking (USD per 1M tokens)
+        self.model_costs = {
+            "gemini-2.5-pro": {"input": 1.25, "output": 10.00}
+        }
+        self.usage_stats = {
+            "cleaning_input_tokens": 0,
+            "cleaning_output_tokens": 0,
+            "summary_input_tokens": 0,
+            "summary_output_tokens": 0,
+            "total_cost": 0.0
+        }
+        
+    def extract_video_id(self, url: str) -> Optional[str]:
+        """Extract video ID from various YouTube URL formats."""
+        patterns = [
+            r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]+)',
+            r'youtube\.com/watch\?.*v=([a-zA-Z0-9_-]+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+    
+    def get_transcript(self, video_url: str) -> List[Dict]:
+        """Extract transcript using yt-dlp."""
+        try:
+            video_id = self.extract_video_id(video_url)
+            if not video_id:
+                raise ValueError("Invalid YouTube URL")
+            
+            # Create temp file for transcript
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.vtt', delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            # Use yt-dlp to extract transcript
+            cmd = [
+                'yt-dlp', 
+                '--write-auto-subs', 
+                '--write-subs',
+                '--sub-langs', 'en',
+                '--sub-format', 'vtt',
+                '--skip-download',
+                '--output', temp_path.replace('.vtt', ''),
+                video_url
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                # Fallback: try with different subtitle options
+                cmd = [
+                    'yt-dlp', 
+                    '--write-auto-subs',
+                    '--sub-langs', 'en',
+                    '--sub-format', 'json3',
+                    '--skip-download',
+                    '--output', temp_path.replace('.vtt', ''),
+                    video_url
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            # Find the generated subtitle files
+            transcript_files = []
+            base_path = temp_path.replace('.vtt', '')
+            
+            for ext in ['.en.vtt', '.en.json3']:
+                potential_file = base_path + ext
+                if os.path.exists(potential_file):
+                    transcript_files.append(potential_file)
+            
+            if not transcript_files:
+                raise FileNotFoundError("No transcript files found")
+            
+            # Parse the transcript
+            transcript = self.parse_transcript_file(transcript_files[0])
+            
+            # Cleanup temp files
+            for file in transcript_files:
+                try:
+                    os.unlink(file)
+                except:
+                    pass
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+                
+            return transcript
+            
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Transcript extraction timed out")
+        except Exception as e:
+            raise RuntimeError(f"Failed to extract transcript: {str(e)}")
+    
+    def parse_transcript_file(self, file_path: str) -> List[Dict]:
+        """Parse transcript file (VTT or JSON3 format)."""
+        transcript = []
+        
+        if file_path.endswith('.vtt'):
+            return self.parse_vtt_file(file_path)
+        elif file_path.endswith('.json3'):
+            return self.parse_json3_file(file_path)
+        
+        return transcript
+    
+    def parse_vtt_file(self, file_path: str) -> List[Dict]:
+        """Parse VTT subtitle file."""
+        transcript = []
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Split by double newlines to get individual subtitle blocks
+        blocks = re.split(r'\n\n+', content)
+        
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if len(lines) >= 2:
+                # Look for timestamp line
+                timestamp_pattern = r'(\d{2}:\d{2}:\d{2}\.\d{3}) --> (\d{2}:\d{2}:\d{2}\.\d{3})'
+                timestamp_match = None
+                text_lines = []
+                
+                for line in lines:
+                    match = re.search(timestamp_pattern, line)
+                    if match:
+                        timestamp_match = match
+                    elif line.strip() and not line.startswith('WEBVTT') and not re.match(r'^\d+$', line.strip()):
+                        # Remove HTML tags and clean text
+                        clean_text = re.sub(r'<[^>]+>', '', line.strip())
+                        if clean_text:
+                            text_lines.append(clean_text)
+                
+                if timestamp_match and text_lines:
+                    start_time = self.timestamp_to_seconds(timestamp_match.group(1))
+                    transcript.append({
+                        'start': start_time,
+                        'text': ' '.join(text_lines)
+                    })
+        
+        return transcript
+    
+    def parse_json3_file(self, file_path: str) -> List[Dict]:
+        """Parse JSON3 subtitle file."""
+        transcript = []
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        if 'events' in data:
+            for event in data['events']:
+                if 'segs' in event and event.get('tStartMs') is not None:
+                    text_parts = []
+                    for seg in event['segs']:
+                        if 'utf8' in seg:
+                            text_parts.append(seg['utf8'])
+                    
+                    if text_parts:
+                        start_seconds = event['tStartMs'] / 1000.0
+                        transcript.append({
+                            'start': start_seconds,
+                            'text': ''.join(text_parts).strip()
+                        })
+        
+        return transcript
+    
+    def timestamp_to_seconds(self, timestamp: str) -> float:
+        """Convert timestamp string to seconds."""
+        parts = timestamp.split(':')
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds_parts = parts[2].split('.')
+        seconds = int(seconds_parts[0])
+        milliseconds = int(seconds_parts[1]) if len(seconds_parts) > 1 else 0
+        
+        total_seconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000.0
+        return total_seconds
+    
+    def seconds_to_youtube_timestamp(self, seconds: float) -> str:
+        """Convert seconds to YouTube timestamp format."""
+        total_seconds = int(seconds)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        secs = total_seconds % 60
+        
+        if hours > 0:
+            return f"{hours}h{minutes}m{secs}s"
+        elif minutes > 0:
+            return f"{minutes}m{secs}s"
+        else:
+            return f"{secs}s"
+    
+    def create_youtube_timestamp_url(self, video_url: str, seconds: float) -> str:
+        """Create YouTube URL with timestamp."""
+        video_id = self.extract_video_id(video_url)
+        timestamp_seconds = int(seconds)
+        return f"https://www.youtube.com/watch?v={video_id}&t={timestamp_seconds}s"
+    
+    def chunk_transcript(self, transcript: List[Dict], max_chunk_words: int = 100000) -> List[List[Dict]]:
+        """Split transcript into manageable chunks for AI processing (based on word count)."""
+        chunks = []
+        current_chunk = []
+        current_word_count = 0
+        
+        for entry in transcript:
+            entry_word_count = len(entry['text'].split())
+            
+            if current_word_count + entry_word_count > max_chunk_words and current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = [entry]
+                current_word_count = entry_word_count
+            else:
+                current_chunk.append(entry)
+                current_word_count += entry_word_count
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        return chunks
+    
+    def clean_transcript_chunk(self, chunk: List[Dict], video_title: str = "") -> str:
+        """Clean a chunk of transcript using Gemini API."""
+        if not self.api_key:
+            # Fallback: basic cleaning without AI
+            return self.basic_clean_transcript(chunk)
+        
+        try:
+            # Prepare text for AI processing
+            text = " ".join([entry['text'] for entry in chunk])
+            
+            title_context = f"\n\nVideo title: {video_title}" if video_title else ""
+            
+            prompt = f"""Please clean up this YouTube transcript excerpt. Remove filler words, fix grammar, and improve readability while preserving the original meaning and important timestamps. Keep the content natural and flowing.
+
+If you notice any misspelled names or terms, please gently correct them using common sense (especially proper nouns that might be auto-transcribed incorrectly).{title_context}
+
+{text}
+
+Return only the cleaned text without any additional formatting or commentary."""
+
+            payload = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 2048
+                }
+            }
+            
+            headers = {"Content-Type": "application/json"}
+            response = requests.post(
+                f"{self.gemini_base_url}/{self.cleaning_model}:generateContent?key={self.api_key}",
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if 'candidates' in result and result['candidates']:
+                    # Track token usage for cost calculation
+                    if 'usageMetadata' in result:
+                        input_tokens = result['usageMetadata'].get('promptTokenCount', 0)
+                        output_tokens = result['usageMetadata'].get('candidatesTokenCount', 0)
+                        self.usage_stats['cleaning_input_tokens'] += input_tokens
+                        self.usage_stats['cleaning_output_tokens'] += output_tokens
+                        self._update_cost('cleaning', input_tokens, output_tokens)
+                    
+                    return result['candidates'][0]['content']['parts'][0]['text'].strip()
+            
+            # Fallback to basic cleaning if API fails
+            return self.basic_clean_transcript(chunk)
+            
+        except Exception as e:
+            print(f"Warning: AI cleaning failed ({str(e)}), using basic cleaning")
+            return self.basic_clean_transcript(chunk)
+    
+    def basic_clean_transcript(self, chunk: List[Dict]) -> str:
+        """Basic transcript cleaning without AI."""
+        text = " ".join([entry['text'] for entry in chunk])
+        
+        # Remove common filler words and clean up
+        filler_words = ['um', 'uh', 'er', 'ah', 'like', 'you know', 'so basically', 'basically']
+        for filler in filler_words:
+            text = re.sub(r'\b' + re.escape(filler) + r'\b', '', text, flags=re.IGNORECASE)
+        
+        # Clean up extra spaces
+        text = ' '.join(text.split())
+        
+        return text
+    
+    def generate_all_summaries(self, clean_transcript: str, video_title: str = "") -> Dict[str, str]:
+        """Generate all summary levels using a single prompt."""
+        if not self.api_key:
+            return {
+                "brief": f"Summary not available (API key required). Original transcript length: {len(clean_transcript)} characters.",
+                "medium": f"Summary not available (API key required). Original transcript length: {len(clean_transcript)} characters.",
+                "detailed": f"Summary not available (API key required). Original transcript length: {len(clean_transcript)} characters."
+            }
+        
+        try:
+            title_context = f"\n\nVideo title: {video_title}" if video_title else ""
+            
+            prompt = f"""Please summarize the following transcript at three levels of detail:
+
+1. BRIEF (1 sentence): The absolute key takeaway in one sentence
+2. MEDIUM (1 paragraph): Main points and key insights in paragraph form  
+3. DETAILED: Comprehensive summary with all major points, insights, and important details organized clearly
+
+Please ensure names and terms are spelled correctly, using the video title as context if helpful.{title_context}
+
+Transcript:
+{clean_transcript}
+
+Please format your response exactly as:
+BRIEF: [one sentence summary]
+
+MEDIUM: [one paragraph summary]
+
+DETAILED: [detailed summary with clear organization]"""
+
+            payload = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 3072
+                }
+            }
+            
+            headers = {"Content-Type": "application/json"}
+            response = requests.post(
+                f"{self.gemini_base_url}/{self.summary_model}:generateContent?key={self.api_key}",
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if 'candidates' in result and result['candidates']:
+                    # Track token usage for cost calculation
+                    if 'usageMetadata' in result:
+                        input_tokens = result['usageMetadata'].get('promptTokenCount', 0)
+                        output_tokens = result['usageMetadata'].get('candidatesTokenCount', 0)
+                        self.usage_stats['summary_input_tokens'] += input_tokens
+                        self.usage_stats['summary_output_tokens'] += output_tokens
+                        self._update_cost('summary', input_tokens, output_tokens)
+                    
+                    content = result['candidates'][0]['content']['parts'][0]['text'].strip()
+                    return self.parse_multi_level_summary(content)
+            
+            return {
+                "brief": "Summary generation failed. Original transcript available above.",
+                "medium": "Summary generation failed. Original transcript available above.",
+                "detailed": "Summary generation failed. Original transcript available above."
+            }
+            
+        except Exception as e:
+            error_msg = f"Summary generation failed ({str(e)}). Original transcript available above."
+            return {"brief": error_msg, "medium": error_msg, "detailed": error_msg}
+    
+    def parse_multi_level_summary(self, content: str) -> Dict[str, str]:
+        """Parse the multi-level summary response."""
+        summaries = {"brief": "", "medium": "", "detailed": ""}
+        
+        # Split content by the section headers
+        sections = content.split('\n')
+        current_section = None
+        current_content = []
+        
+        for line in sections:
+            line = line.strip()
+            if line.startswith('BRIEF:'):
+                if current_section and current_content:
+                    summaries[current_section] = '\n'.join(current_content).strip()
+                current_section = 'brief'
+                current_content = [line.replace('BRIEF:', '').strip()]
+            elif line.startswith('MEDIUM:'):
+                if current_section and current_content:
+                    summaries[current_section] = '\n'.join(current_content).strip()
+                current_section = 'medium'
+                current_content = [line.replace('MEDIUM:', '').strip()]
+            elif line.startswith('DETAILED:'):
+                if current_section and current_content:
+                    summaries[current_section] = '\n'.join(current_content).strip()
+                current_section = 'detailed'
+                current_content = [line.replace('DETAILED:', '').strip()]
+            elif current_section and line:
+                current_content.append(line)
+        
+        # Don't forget the last section
+        if current_section and current_content:
+            summaries[current_section] = '\n'.join(current_content).strip()
+        
+        # Fallback if parsing fails
+        if not any(summaries.values()):
+            summaries["brief"] = content[:200] + "..." if len(content) > 200 else content
+            summaries["medium"] = content
+            summaries["detailed"] = content
+        
+        return summaries
+    
+    def get_video_title(self, video_url: str) -> str:
+        """Extract video title using yt-dlp."""
+        try:
+            cmd = ['yt-dlp', '--get-title', video_url]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                title = result.stdout.strip()
+                # Clean title for filename
+                title = re.sub(r'[^\w\s-]', '', title)
+                title = re.sub(r'[-\s]+', '-', title)
+                return title[:80]  # Limit length
+            return "Unknown-Title"
+        except:
+            return "Unknown-Title"
+
+    def group_transcript_by_intervals(self, transcript: List[Dict], interval_minutes: int = 3) -> List[Dict]:
+        """Group transcript entries into time intervals (default 3 minutes)."""
+        if not transcript:
+            return []
+        
+        interval_seconds = interval_minutes * 60
+        grouped_transcript = []
+        current_group = []
+        current_interval_start = 0
+        
+        for entry in transcript:
+            entry_interval = int(entry['start'] // interval_seconds) * interval_seconds
+            
+            if entry_interval > current_interval_start:
+                # Save current group if it has content
+                if current_group:
+                    combined_text = ' '.join([e['text'] for e in current_group])
+                    grouped_transcript.append({
+                        'start': current_interval_start,
+                        'text': combined_text
+                    })
+                
+                # Start new group
+                current_interval_start = entry_interval
+                current_group = [entry]
+            else:
+                current_group.append(entry)
+        
+        # Don't forget the last group
+        if current_group:
+            combined_text = ' '.join([e['text'] for e in current_group])
+            grouped_transcript.append({
+                'start': current_interval_start,
+                'text': combined_text
+            })
+        
+        return grouped_transcript
+
+    def _update_cost(self, operation: str, input_tokens: int, output_tokens: int):
+        """Update cost tracking based on token usage."""
+        model = self.cleaning_model if operation == 'cleaning' else self.summary_model
+        if model in self.model_costs:
+            input_cost = (input_tokens / 1_000_000) * self.model_costs[model]["input"]
+            output_cost = (output_tokens / 1_000_000) * self.model_costs[model]["output"]
+            self.usage_stats['total_cost'] += input_cost + output_cost
+
+    def get_cost_summary(self) -> str:
+        """Generate a cost summary string."""
+        if not self.api_key:
+            return "Cost tracking unavailable (no API key provided)"
+        
+        total_input = self.usage_stats['cleaning_input_tokens'] + self.usage_stats['summary_input_tokens']
+        total_output = self.usage_stats['cleaning_output_tokens'] + self.usage_stats['summary_output_tokens']
+        
+        return f"""**Cost Summary:**
+- Cleaning: {self.usage_stats['cleaning_input_tokens']:,} input + {self.usage_stats['cleaning_output_tokens']:,} output tokens
+- Summary: {self.usage_stats['summary_input_tokens']:,} input + {self.usage_stats['summary_output_tokens']:,} output tokens
+- Total: {total_input:,} input + {total_output:,} output tokens
+- Estimated cost: ${self.usage_stats['total_cost']:.4f} USD"""
+
+    def format_output(self, video_url: str, transcript: List[Dict], clean_transcript: str, summaries: Dict[str, str]) -> str:
+        """Format the final output in Org mode format."""
+        title = self.get_video_title(video_url)
+        timestamp = datetime.now().strftime("%Y-%m-%d")
+        
+        # Group transcript into 3-minute intervals for less granular timestamps
+        grouped_transcript = self.group_transcript_by_intervals(transcript, 3)
+        
+        output = f"""#+TITLE: {title.replace('-', ' ')}
+#+DATE: {timestamp}
+#+SOURCE: {video_url}
+
+* Brief Summary
+{summaries['brief']}
+
+* Medium Summary
+{summaries['medium']}
+
+* Detailed Summary
+{summaries['detailed']}
+
+* Cost Information
+{self.get_cost_summary()}
+
+* Transcript
+"""
+        
+        for entry in grouped_transcript:
+            timestamp_url = self.create_youtube_timestamp_url(video_url, entry['start'])
+            readable_time = self.format_timestamp_for_org(entry['start'])
+            output += f"\n[{readable_time}]({timestamp_url}) {entry['text']}\n"
+        
+        return output
+
+    def format_timestamp_for_org(self, seconds: float) -> str:
+        """Format timestamp for Org mode."""
+        total_seconds = int(seconds)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        secs = total_seconds % 60
+        
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        else:
+            return f"{minutes:02d}:{secs:02d}"
+    
+    def process_video(self, video_url: str, output_file: Optional[str] = None) -> str:
+        """Main processing function."""
+        try:
+            print("Extracting transcript...")
+            transcript = self.get_transcript(video_url)
+            
+            if not transcript:
+                raise ValueError("No transcript found for this video")
+            
+            print(f"Found {len(transcript)} transcript segments")
+            
+            # Get video title for context
+            video_title = self.get_video_title(video_url)
+            
+            # Chunk transcript for processing
+            print("Processing transcript...")
+            chunks = self.chunk_transcript(transcript)
+            cleaned_chunks = []
+            
+            for i, chunk in enumerate(chunks):
+                print(f"Processing chunk {i+1}/{len(chunks)}...")
+                cleaned_text = self.clean_transcript_chunk(chunk, video_title)
+                cleaned_chunks.append(cleaned_text)
+            
+            clean_transcript = " ".join(cleaned_chunks)
+            
+            # Generate summaries
+            print("Generating summaries...")
+            summaries = self.generate_all_summaries(clean_transcript, video_title)
+            
+            # Format output
+            formatted_output = self.format_output(video_url, transcript, clean_transcript, summaries)
+            
+            # Print cost summary to console
+            print(f"\n{self.get_cost_summary()}")
+            
+            # Save to file
+            if output_file:
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    f.write(formatted_output)
+                print(f"Output saved to: {output_file}")
+            else:
+                # Generate default filename in ~/transcripts directory
+                transcripts_dir = os.path.expanduser("~/transcripts")
+                os.makedirs(transcripts_dir, exist_ok=True)
+                
+                title = self.get_video_title(video_url)
+                default_filename = os.path.join(transcripts_dir, f"youtube-transcript-{title}.org")
+                with open(default_filename, 'w', encoding='utf-8') as f:
+                    f.write(formatted_output)
+                print(f"Output saved to: {default_filename}")
+            
+            return formatted_output
+            
+        except Exception as e:
+            error_msg = f"Error processing video: {str(e)}"
+            print(error_msg)
+            return error_msg
+
+def main():
+    parser = argparse.ArgumentParser(description="YouTube Transcript Summarizer")
+    parser.add_argument("url", help="YouTube video URL")
+    parser.add_argument("-o", "--output", help="Output file path")
+    parser.add_argument("--api-key", help="Gemini API key (or set GEMINI_API_KEY env var)")
+    
+    args = parser.parse_args()
+    
+    # Check for yt-dlp
+    try:
+        subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Error: yt-dlp is required but not found. Please install it:")
+        print("pip install yt-dlp")
+        sys.exit(1)
+    
+    # Initialize summarizer
+    api_key = args.api_key or os.getenv('GEMINI_API_KEY')
+    if not api_key:
+        print("Warning: No Gemini API key provided. AI features will be disabled.")
+        print("Set GEMINI_API_KEY environment variable or use --api-key option")
+    
+    summarizer = YouTubeTranscriptSummarizer(api_key)
+    
+    try:
+        result = summarizer.process_video(args.url, args.output)
+        print("\nProcessing completed successfully!")
+        
+        # Print summary to terminal with visual formatting
+        print("\n" + "="*80)
+        print("📋 SUMMARY")
+        print("="*80)
+        
+        # Extract summaries from the result
+        lines = result.split('\n')
+        in_brief = False
+        in_medium = False
+        in_detailed = False
+        brief_content = []
+        medium_content = []
+        detailed_content = []
+        
+        for line in lines:
+            if line.strip() == "* Brief Summary":
+                in_brief = True
+                in_medium = in_detailed = False
+                continue
+            elif line.strip() == "* Medium Summary":
+                in_medium = True
+                in_brief = in_detailed = False
+                continue
+            elif line.strip() == "* Detailed Summary":
+                in_detailed = True
+                in_brief = in_medium = False
+                continue
+            elif line.strip().startswith("* "):
+                in_brief = in_medium = in_detailed = False
+                continue
+            
+            if in_brief and line.strip():
+                brief_content.append(line)
+            elif in_medium and line.strip():
+                medium_content.append(line)
+            elif in_detailed and line.strip():
+                detailed_content.append(line)
+        
+        # Print each summary level with formatting
+        if brief_content:
+            print("\n🔸 BRIEF SUMMARY:")
+            print('-' * 40)
+            for line in brief_content:
+                print(line)
+        
+        if medium_content:
+            print("\n🔸 MEDIUM SUMMARY:")
+            print('-' * 40)
+            for line in medium_content:
+                print(line)
+        
+        if detailed_content:
+            print("\n🔸 DETAILED SUMMARY:")
+            print('-' * 40)
+            for line in detailed_content:
+                print(line)
+        
+        print("\n" + "="*80)
+        
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Fatal error: {str(e)}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
