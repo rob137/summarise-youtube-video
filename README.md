@@ -52,15 +52,7 @@ cp .env.example .env
 ./summarise-video https://www.youtube.com/watch?v=VIDEO_ID
 ```
 
-### With custom output file:
-```bash
-./summarise-video https://www.youtube.com/watch?v=VIDEO_ID -o my-summary.org
-```
-
-### With API key (if not set in environment):
-```bash
-./summarise-video https://www.youtube.com/watch?v=VIDEO_ID --api-key YOUR_KEY
-```
+The script takes only one argument - the YouTube URL. Output files are automatically saved to `~/transcripts/` and the API key must be set as an environment variable.
 
 ## Output
 

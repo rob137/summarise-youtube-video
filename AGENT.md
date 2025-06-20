@@ -2,9 +2,9 @@
 
 ## Commands
 - **Run tool**: `./summarise-video <youtube_url>` or `python3 summarise-video <youtube_url>`
-- **With output file**: `./summarise-video <youtube_url> -o output.md`
-- **With API key**: `./summarise-video <youtube_url> --api-key YOUR_KEY`
 - **Test dependencies**: `yt-dlp --version` and check `GEMINI_API_KEY` env var
+
+Note: Script only accepts a single YouTube URL argument. Output files are automatically saved to `~/transcripts/` directory. API key must be set via `GEMINI_API_KEY` environment variable.
 
 ## Architecture
 - Single Python script (`summarise-video`) with YouTube transcript extraction and AI summarization
@@ -24,3 +24,4 @@
 - Comprehensive docstrings for all methods
 - 4-space indentation, max 100 characters per line where possible
 - Use f-strings for string formatting
+- Extensive assertions for input validation and bug catching

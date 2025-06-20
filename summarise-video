@@ -9,7 +9,7 @@ import sys
 import os
 import re
 import json
-import argparse
+
 import subprocess
 import tempfile
 import time
@@ -22,12 +22,32 @@ from datetime import datetime
 class YouTubeTranscriptSummarizer:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv('GEMINI_API_KEY')
+        
+        # Validate configuration
         self.gemini_base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+        assert isinstance(self.gemini_base_url, str)
+        assert self.gemini_base_url.startswith("https://"), "API base URL must use HTTPS"
+        
         self.cleaning_model = "gemini-2.0-flash-exp"
+        assert isinstance(self.cleaning_model, str)
+        assert len(self.cleaning_model) > 0, "Cleaning model name cannot be empty"
+        
         self.summary_model = "gemini-2.5-pro"
+        assert isinstance(self.summary_model, str)
+        assert len(self.summary_model) > 0, "Summary model name cannot be empty"
+        
         self.max_retries = 3
+        assert isinstance(self.max_retries, int)
+        assert self.max_retries > 0, "Max retries must be positive"
+        
         self.base_delay = 1
+        assert isinstance(self.base_delay, int)
+        assert self.base_delay > 0, "Base delay must be positive"
+        
         self.api_timeout = 300  # seconds
+        assert isinstance(self.api_timeout, int)
+        assert self.api_timeout > 0, "API timeout must be positive"
+        
         self.start_time = None
         self.progress_timer = None
         self.stop_progress = False
@@ -36,6 +56,13 @@ class YouTubeTranscriptSummarizer:
         self.model_costs = {
             "gemini-2.5-pro": {"input": 1.25, "output": 10.00}
         }
+        assert isinstance(self.model_costs, dict), "Model costs must be a dictionary"
+        for model, costs in self.model_costs.items():
+            assert isinstance(model, str), f"Model name must be string, got {type(model)}"
+            assert isinstance(costs, dict), f"Costs for {model} must be dict"
+            assert "input" in costs and "output" in costs, f"Model {model} missing input/output costs"
+            assert costs["input"] > 0 and costs["output"] > 0, f"Model {model} costs must be positive"
+        
         self.usage_stats = {
             "cleaning_input_tokens": 0,
             "cleaning_output_tokens": 0,
@@ -43,15 +70,25 @@ class YouTubeTranscriptSummarizer:
             "summary_output_tokens": 0,
             "total_cost": 0.0
         }
+        assert isinstance(self.usage_stats, dict), "Usage stats must be a dictionary"
+        for key, value in self.usage_stats.items():
+            assert isinstance(key, str), f"Usage stat key must be string, got {type(key)}"
+            assert isinstance(value, (int, float)), f"Usage stat {key} must be numeric, got {type(value)}"
+            assert value >= 0, f"Usage stat {key} must be non-negative, got {value}"
     
     def _start_progress_timer(self, operation_name: str):
         """Start a progress timer that shows elapsed time."""
+        assert isinstance(operation_name, str), f"Operation name must be string, got {type(operation_name)}"
+        assert len(operation_name.strip()) > 0, "Operation name cannot be empty"
+        
         self.start_time = time.time()
         self.stop_progress = False
         
         def show_progress():
             while not self.stop_progress:
+                assert self.start_time is not None, "Start time should be set"
                 elapsed = time.time() - self.start_time
+                assert elapsed >= 0, f"Elapsed time cannot be negative: {elapsed}"
                 minutes = int(elapsed // 60)
                 seconds = int(elapsed % 60)
                 print(f"\r[{minutes:02d}:{seconds:02d}] {operation_name}...", end="", flush=True)
@@ -71,6 +108,13 @@ class YouTubeTranscriptSummarizer:
         
     def _make_api_request_with_retry(self, url: str, payload: dict, headers: dict, operation_name: str) -> requests.Response:
         """Make API request with exponential backoff retry logic."""
+        assert isinstance(url, str), f"URL must be string, got {type(url)}"
+        assert url.startswith("https://"), f"URL must use HTTPS: {url}"
+        assert isinstance(payload, dict), f"Payload must be dict, got {type(payload)}"
+        assert isinstance(headers, dict), f"Headers must be dict, got {type(headers)}"
+        assert isinstance(operation_name, str), f"Operation name must be string, got {type(operation_name)}"
+        assert len(operation_name.strip()) > 0, "Operation name cannot be empty"
+        
         print(f"Starting {operation_name} (timeout: {self.api_timeout}s)...")
         for attempt in range(self.max_retries):
             try:
@@ -114,27 +158,44 @@ class YouTubeTranscriptSummarizer:
         
     def extract_video_id(self, url: str) -> Optional[str]:
         """Extract video ID from various YouTube URL formats."""
+        assert isinstance(url, str), f"URL must be string, got {type(url)}"
+        assert len(url.strip()) > 0, "URL cannot be empty"
+        
         patterns = [
             r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]+)',
             r'youtube\.com/watch\?.*v=([a-zA-Z0-9_-]+)',
         ]
         
         for pattern in patterns:
+            assert isinstance(pattern, str), f"Pattern must be string, got {type(pattern)}"
             match = re.search(pattern, url)
             if match:
-                return match.group(1)
+                video_id = match.group(1)
+                assert isinstance(video_id, str), f"Video ID must be string, got {type(video_id)}"
+                assert len(video_id) > 0, "Video ID cannot be empty"
+                assert re.match(r'^[a-zA-Z0-9_-]+$', video_id), f"Invalid video ID format: {video_id}"
+                return video_id
         return None
     
     def get_transcript(self, video_url: str) -> List[Dict]:
         """Extract transcript using yt-dlp."""
+        assert isinstance(video_url, str), f"Video URL must be string, got {type(video_url)}"
+        assert len(video_url.strip()) > 0, "Video URL cannot be empty"
+        
         try:
             video_id = self.extract_video_id(video_url)
             if not video_id:
                 raise ValueError("Invalid YouTube URL")
             
+            assert isinstance(video_id, str), f"Video ID must be string, got {type(video_id)}"
+            assert len(video_id) > 0, "Video ID cannot be empty"
+            
             # Create temp file for transcript
             with tempfile.NamedTemporaryFile(mode='w', suffix='.vtt', delete=False) as temp_file:
                 temp_path = temp_file.name
+            
+            assert isinstance(temp_path, str), f"Temp path must be string, got {type(temp_path)}"
+            assert os.path.exists(os.path.dirname(temp_path)), f"Temp directory doesn't exist: {os.path.dirname(temp_path)}"
             
             # Use yt-dlp to extract transcript
             cmd = [
@@ -183,6 +244,7 @@ class YouTubeTranscriptSummarizer:
             
             # Parse the transcript
             transcript = self.parse_transcript_file(transcript_files[0])
+            assert isinstance(transcript, list), f"Transcript must be list, got {type(transcript)}"
             
             # Cleanup temp files
             for file in transcript_files:
@@ -194,6 +256,15 @@ class YouTubeTranscriptSummarizer:
                 os.unlink(temp_path)
             except:
                 pass
+            
+            # Validate transcript structure
+            for i, entry in enumerate(transcript):
+                assert isinstance(entry, dict), f"Transcript entry {i} must be dict, got {type(entry)}"
+                assert 'start' in entry, f"Transcript entry {i} missing 'start' field"
+                assert 'text' in entry, f"Transcript entry {i} missing 'text' field"
+                assert isinstance(entry['start'], (int, float)), f"Transcript entry {i} 'start' must be numeric, got {type(entry['start'])}"
+                assert entry['start'] >= 0, f"Transcript entry {i} 'start' must be non-negative, got {entry['start']}"
+                assert isinstance(entry['text'], str), f"Transcript entry {i} 'text' must be string, got {type(entry['text'])}"
                 
             return transcript
             
@@ -204,13 +275,20 @@ class YouTubeTranscriptSummarizer:
     
     def parse_transcript_file(self, file_path: str) -> List[Dict]:
         """Parse transcript file (VTT or JSON3 format)."""
+        assert isinstance(file_path, str), f"File path must be string, got {type(file_path)}"
+        assert len(file_path.strip()) > 0, "File path cannot be empty"
+        assert os.path.exists(file_path), f"Transcript file doesn't exist: {file_path}"
+        
         transcript = []
         
         if file_path.endswith('.vtt'):
-            return self.parse_vtt_file(file_path)
+            transcript = self.parse_vtt_file(file_path)
         elif file_path.endswith('.json3'):
-            return self.parse_json3_file(file_path)
+            transcript = self.parse_json3_file(file_path)
+        else:
+            raise ValueError(f"Unsupported transcript file format: {file_path}")
         
+        assert isinstance(transcript, list), f"Parsed transcript must be list, got {type(transcript)}"
         return transcript
     
     def parse_vtt_file(self, file_path: str) -> List[Dict]:
@@ -276,14 +354,25 @@ class YouTubeTranscriptSummarizer:
     
     def timestamp_to_seconds(self, timestamp: str) -> float:
         """Convert timestamp string to seconds."""
+        assert isinstance(timestamp, str), f"Timestamp must be string, got {type(timestamp)}"
+        assert len(timestamp.strip()) > 0, "Timestamp cannot be empty"
+        
         parts = timestamp.split(':')
+        assert len(parts) == 3, f"Timestamp must have format HH:MM:SS.mmm, got: {timestamp}"
+        
         hours = int(parts[0])
         minutes = int(parts[1])
         seconds_parts = parts[2].split('.')
         seconds = int(seconds_parts[0])
         milliseconds = int(seconds_parts[1]) if len(seconds_parts) > 1 else 0
         
+        assert 0 <= hours <= 23, f"Hours must be 0-23, got {hours}"
+        assert 0 <= minutes <= 59, f"Minutes must be 0-59, got {minutes}"
+        assert 0 <= seconds <= 59, f"Seconds must be 0-59, got {seconds}"
+        assert 0 <= milliseconds <= 999, f"Milliseconds must be 0-999, got {milliseconds}"
+        
         total_seconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000.0
+        assert total_seconds >= 0, f"Total seconds cannot be negative: {total_seconds}"
         return total_seconds
     
     def seconds_to_youtube_timestamp(self, seconds: float) -> str:
@@ -308,12 +397,21 @@ class YouTubeTranscriptSummarizer:
     
     def chunk_transcript(self, transcript: List[Dict], max_chunk_words: int = 45000) -> List[List[Dict]]:
         """Split transcript into manageable chunks for AI processing (based on word count)."""
+        assert isinstance(transcript, list), f"Transcript must be list, got {type(transcript)}"
+        assert isinstance(max_chunk_words, int), f"Max chunk words must be int, got {type(max_chunk_words)}"
+        assert max_chunk_words > 0, f"Max chunk words must be positive, got {max_chunk_words}"
+        
         chunks = []
         current_chunk = []
         current_word_count = 0
         
-        for entry in transcript:
+        for i, entry in enumerate(transcript):
+            assert isinstance(entry, dict), f"Transcript entry {i} must be dict, got {type(entry)}"
+            assert 'text' in entry, f"Transcript entry {i} missing 'text' field"
+            assert isinstance(entry['text'], str), f"Transcript entry {i} 'text' must be string, got {type(entry['text'])}"
+            
             entry_word_count = len(entry['text'].split())
+            assert entry_word_count >= 0, f"Entry word count cannot be negative: {entry_word_count}"
             
             if current_word_count + entry_word_count > max_chunk_words and current_chunk:
                 chunks.append(current_chunk)
@@ -325,6 +423,12 @@ class YouTubeTranscriptSummarizer:
         
         if current_chunk:
             chunks.append(current_chunk)
+        
+        assert isinstance(chunks, list), f"Chunks must be list, got {type(chunks)}"
+        assert len(chunks) > 0, "Must have at least one chunk"
+        for i, chunk in enumerate(chunks):
+            assert isinstance(chunk, list), f"Chunk {i} must be list, got {type(chunk)}"
+            assert len(chunk) > 0, f"Chunk {i} cannot be empty"
         
         return chunks
     
@@ -651,7 +755,7 @@ DETAILED: [detailed summary with clear organization]"""
         else:
             return f"{minutes:02d}:{secs:02d}"
     
-    def process_video(self, video_url: str, output_file: Optional[str] = None) -> str:
+    def process_video(self, video_url: str) -> str:
         """Main processing function."""
         try:
             self._start_progress_timer("Extracting transcript")
@@ -692,21 +796,15 @@ DETAILED: [detailed summary with clear organization]"""
             # Print cost summary to console
             print(f"\n{self.get_cost_summary()}")
             
-            # Save to file
-            if output_file:
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    f.write(formatted_output)
-                print(f"Output saved to: {output_file}")
-            else:
-                # Generate default filename in ~/transcripts directory
-                transcripts_dir = os.path.expanduser("~/transcripts")
-                os.makedirs(transcripts_dir, exist_ok=True)
-                
-                title = self.get_video_title(video_url)
-                default_filename = os.path.join(transcripts_dir, f"youtube-transcript-{title}.org")
-                with open(default_filename, 'w', encoding='utf-8') as f:
-                    f.write(formatted_output)
-                print(f"Output saved to: {default_filename}")
+            # Generate default filename in ~/transcripts directory
+            transcripts_dir = os.path.expanduser("~/transcripts")
+            os.makedirs(transcripts_dir, exist_ok=True)
+            
+            title = self.get_video_title(video_url)
+            default_filename = os.path.join(transcripts_dir, f"youtube-transcript-{title}.org")
+            with open(default_filename, 'w', encoding='utf-8') as f:
+                f.write(formatted_output)
+            print(f"Output saved to: {default_filename}")
             
             return formatted_output
             
@@ -716,12 +814,18 @@ DETAILED: [detailed summary with clear organization]"""
             return error_msg
 
 def main():
-    parser = argparse.ArgumentParser(description="YouTube Transcript Summarizer")
-    parser.add_argument("url", help="YouTube video URL")
-    parser.add_argument("-o", "--output", help="Output file path")
-    parser.add_argument("--api-key", help="Gemini API key (or set GEMINI_API_KEY env var)")
+    assert len(sys.argv) >= 1, "sys.argv should always have at least the script name"
     
-    args = parser.parse_args()
+    if len(sys.argv) != 2:
+        print("Usage: ./summarise-video <youtube_url>")
+        sys.exit(1)
+    
+    video_url = sys.argv[1]
+    assert isinstance(video_url, str), f"Video URL must be string, got {type(video_url)}"
+    assert len(video_url.strip()) > 0, "Video URL cannot be empty"
+    
+    # Basic YouTube URL validation
+    assert any(domain in video_url.lower() for domain in ['youtube.com', 'youtu.be']), f"Not a YouTube URL: {video_url}"
     
     # Check for yt-dlp
     try:
@@ -732,15 +836,16 @@ def main():
         sys.exit(1)
     
     # Initialize summarizer
-    api_key = args.api_key or os.getenv('GEMINI_API_KEY')
+    api_key = os.getenv('GEMINI_API_KEY')
     if not api_key:
         print("Warning: No Gemini API key provided. AI features will be disabled.")
-        print("Set GEMINI_API_KEY environment variable or use --api-key option")
+        print("Set GEMINI_API_KEY environment variable")
     
     summarizer = YouTubeTranscriptSummarizer(api_key)
+    assert isinstance(summarizer, YouTubeTranscriptSummarizer), "Failed to create summarizer instance"
     
     try:
-        result = summarizer.process_video(args.url, args.output)
+        result = summarizer.process_video(video_url)
         print("\nProcessing completed successfully!")
         
         # Print summary to terminal with visual formatting
