@@ -91,7 +91,8 @@ class YouTubeTranscriptSummarizer:
                 assert elapsed >= 0, f"Elapsed time cannot be negative: {elapsed}"
                 minutes = int(elapsed // 60)
                 seconds = int(elapsed % 60)
-                print(f"\r[{minutes:02d}:{seconds:02d}] {operation_name}...", end="", flush=True)
+                # Clear the line completely before writing new content
+                print(f"\r{' ' * 80}\r[{minutes:02d}:{seconds:02d}] {operation_name}...", end="", flush=True)
                 time.sleep(1)
         
         self.progress_timer = threading.Thread(target=show_progress, daemon=True)
@@ -104,7 +105,8 @@ class YouTubeTranscriptSummarizer:
             elapsed = time.time() - self.start_time if self.start_time else 0
             minutes = int(elapsed // 60)
             seconds = int(elapsed % 60)
-            print(f"\r[{minutes:02d}:{seconds:02d}] ✓ Completed")
+            # Clear the line completely and show completion
+            print(f"\r{' ' * 80}\r[{minutes:02d}:{seconds:02d}] ✓ Completed")
         
     def _make_api_request_with_retry(self, url: str, payload: dict, headers: dict, operation_name: str) -> requests.Response:
         """Make API request with exponential backoff retry logic."""
@@ -472,7 +474,6 @@ Return only the cleaned text without any additional formatting or commentary."""
             
             if response.status_code == 200:
                 result = response.json()
-                print(f"API Response structure: {json.dumps(result, indent=2)[:500]}...")
                 
                 if 'candidates' in result and result['candidates']:
                     candidate = result['candidates'][0]
