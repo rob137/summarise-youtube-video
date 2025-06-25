@@ -248,6 +248,17 @@ class YouTubeTranscriptSummarizer:
             transcript = self.parse_transcript_file(transcript_files[0])
             assert isinstance(transcript, list), f"Transcript must be list, got {type(transcript)}"
             
+            # Quick logging to show timestamp data
+            if transcript:
+                print(f"DEBUG: First few transcript entries with timestamps:")
+                for i, entry in enumerate(transcript[:3]):
+                    if 'start' in entry:
+                        minutes = int(entry['start'] // 60)
+                        seconds = int(entry['start'] % 60)
+                        print(f"  {minutes:02d}:{seconds:02d} - {entry['text'][:50]}...")
+                    if i >= 2:
+                        break
+            
             # Cleanup temp files
             for file in transcript_files:
                 try:
@@ -376,73 +387,32 @@ class YouTubeTranscriptSummarizer:
         total_seconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000.0
         assert total_seconds >= 0, f"Total seconds cannot be negative: {total_seconds}"
         return total_seconds
-    
-    def seconds_to_youtube_timestamp(self, seconds: float) -> str:
-        """Convert seconds to YouTube timestamp format."""
-        total_seconds = int(seconds)
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        secs = total_seconds % 60
         
-        if hours > 0:
-            return f"{hours}h{minutes}m{secs}s"
-        elif minutes > 0:
-            return f"{minutes}m{secs}s"
-        else:
-            return f"{secs}s"
-    
-    def create_youtube_timestamp_url(self, video_url: str, seconds: float) -> str:
-        """Create YouTube URL with timestamp."""
-        video_id = self.extract_video_id(video_url)
-        timestamp_seconds = int(seconds)
-        return f"https://www.youtube.com/watch?v={video_id}&t={timestamp_seconds}s"
-    
-    def chunk_transcript(self, transcript: List[Dict], max_chunk_words: int = 45000) -> List[List[Dict]]:
-        """Split transcript into manageable chunks for AI processing (based on word count)."""
+    def extract_transcript_text(self, transcript: List[Dict]) -> str:
+        """Extract just the text from transcript entries."""
         assert isinstance(transcript, list), f"Transcript must be list, got {type(transcript)}"
-        assert isinstance(max_chunk_words, int), f"Max chunk words must be int, got {type(max_chunk_words)}"
-        assert max_chunk_words > 0, f"Max chunk words must be positive, got {max_chunk_words}"
         
-        chunks = []
-        current_chunk = []
-        current_word_count = 0
-        
+        text_parts = []
         for i, entry in enumerate(transcript):
             assert isinstance(entry, dict), f"Transcript entry {i} must be dict, got {type(entry)}"
             assert 'text' in entry, f"Transcript entry {i} missing 'text' field"
             assert isinstance(entry['text'], str), f"Transcript entry {i} 'text' must be string, got {type(entry['text'])}"
-            
-            entry_word_count = len(entry['text'].split())
-            assert entry_word_count >= 0, f"Entry word count cannot be negative: {entry_word_count}"
-            
-            if current_word_count + entry_word_count > max_chunk_words and current_chunk:
-                chunks.append(current_chunk)
-                current_chunk = [entry]
-                current_word_count = entry_word_count
-            else:
-                current_chunk.append(entry)
-                current_word_count += entry_word_count
+            text_parts.append(entry['text'])
         
-        if current_chunk:
-            chunks.append(current_chunk)
-        
-        assert isinstance(chunks, list), f"Chunks must be list, got {type(chunks)}"
-        assert len(chunks) > 0, "Must have at least one chunk"
-        for i, chunk in enumerate(chunks):
-            assert isinstance(chunk, list), f"Chunk {i} must be list, got {type(chunk)}"
-            assert len(chunk) > 0, f"Chunk {i} cannot be empty"
-        
-        return chunks
+        return " ".join(text_parts)
+
+     
+
     
-    def clean_transcript_chunk(self, chunk: List[Dict], video_title: str = "") -> str:
-        """Clean a chunk of transcript using Gemini API."""
+    def clean_transcript(self, transcript_text: str, video_title: str = "") -> str:
+        """Clean the full transcript using Gemini API."""
         if not self.api_key:
             print("Error: GEMINI_API_KEY is required for transcript cleaning")
             sys.exit(1)
         
         try:
-            # Prepare text for AI processing
-            text = " ".join([entry['text'] for entry in chunk])
+            # Use the provided transcript text directly
+            text = transcript_text
             
             title_context = f"\n\nVideo title: {video_title}" if video_title else ""
             
@@ -650,43 +620,7 @@ DETAILED: [detailed summary with clear organization]"""
         except:
             return "Unknown-Title"
 
-    def group_transcript_by_intervals(self, transcript: List[Dict], interval_minutes: int = 3) -> List[Dict]:
-        """Group transcript entries into time intervals (default 3 minutes)."""
-        if not transcript:
-            return []
-        
-        interval_seconds = interval_minutes * 60
-        grouped_transcript = []
-        current_group = []
-        current_interval_start = 0
-        
-        for entry in transcript:
-            entry_interval = int(entry['start'] // interval_seconds) * interval_seconds
-            
-            if entry_interval > current_interval_start:
-                # Save current group if it has content
-                if current_group:
-                    combined_text = ' '.join([e['text'] for e in current_group])
-                    grouped_transcript.append({
-                        'start': current_interval_start,
-                        'text': combined_text
-                    })
-                
-                # Start new group
-                current_interval_start = entry_interval
-                current_group = [entry]
-            else:
-                current_group.append(entry)
-        
-        # Don't forget the last group
-        if current_group:
-            combined_text = ' '.join([e['text'] for e in current_group])
-            grouped_transcript.append({
-                'start': current_interval_start,
-                'text': combined_text
-            })
-        
-        return grouped_transcript
+
 
     def _update_cost(self, operation: str, input_tokens: int, output_tokens: int):
         """Update cost tracking based on token usage."""
@@ -704,57 +638,87 @@ DETAILED: [detailed summary with clear organization]"""
         total_input = self.usage_stats['cleaning_input_tokens'] + self.usage_stats['summary_input_tokens']
         total_output = self.usage_stats['cleaning_output_tokens'] + self.usage_stats['summary_output_tokens']
         
-        return f"""**Cost Summary:**
+        return f"""*Cost Summary:*
 - Cleaning: {self.usage_stats['cleaning_input_tokens']:,} input + {self.usage_stats['cleaning_output_tokens']:,} output tokens
 - Summary: {self.usage_stats['summary_input_tokens']:,} input + {self.usage_stats['summary_output_tokens']:,} output tokens
 - Total: {total_input:,} input + {total_output:,} output tokens
 - Estimated cost: ${self.usage_stats['total_cost']:.4f} USD"""
 
-    def format_output(self, video_url: str, transcript: List[Dict], clean_transcript: str, summaries: Dict[str, str]) -> str:
-        """Format the final output in Org mode format."""
+    def format_transcript_with_timestamps(self, transcript: List[Dict], clean_transcript: str, video_url: str, interval: int = 180) -> str:
+        """Add hyperlinked timestamp markers to clean transcript every interval seconds."""
+        if not transcript:
+            return clean_transcript
+        
+        # Split clean transcript into words to match with original transcript
+        clean_words = clean_transcript.split()
+        transcript_words = []
+        word_timestamps = []
+        
+        # Extract words and their approximate timestamps from original transcript
+        for entry in transcript:
+            entry_words = entry['text'].split()
+            for word in entry_words:
+                transcript_words.append(word)
+                word_timestamps.append(entry['start'])
+        
+        # Build output with timestamp markers
+        result = []
+        last_marker_time = 0
+        
+        for i, clean_word in enumerate(clean_words):
+            # Find approximate timestamp for this word position
+            word_index = min(i, len(word_timestamps) - 1) if word_timestamps else 0
+            current_time = word_timestamps[word_index] if word_timestamps else 0
+            
+            # Insert timestamp marker if we've crossed the interval
+            if current_time >= last_marker_time + interval:
+                marker_time = int(current_time)
+                minutes = marker_time // 60
+                seconds = marker_time % 60
+                
+                # Create hyperlinked timestamp
+                timestamp_url = f"{video_url}&t={marker_time}s"
+                result.append(f"\n\n**[{minutes:02d}:{seconds:02d}]({timestamp_url})**\n")
+                last_marker_time = marker_time
+            
+            result.append(clean_word)
+        
+        return ' '.join(result)
+
+    def format_output(self, video_url: str, clean_transcript: str, summaries: Dict[str, str], transcript: List[Dict] = None) -> str:
+        """Format the final output in org mode format."""
         title = self.get_video_title(video_url)
         timestamp = datetime.now().strftime("%Y-%m-%d")
         
-        # Group transcript into 3-minute intervals for less granular timestamps
-        grouped_transcript = self.group_transcript_by_intervals(transcript, 3)
+        # Add timestamp markers to transcript if original transcript data is available
+        formatted_transcript = clean_transcript
+        if transcript:
+            formatted_transcript = self.format_transcript_with_timestamps(transcript, clean_transcript, video_url)
         
-        output = f"""#+TITLE: {title.replace('-', ' ')}
-#+DATE: {timestamp}
-#+SOURCE: {video_url}
+        output = f"""* {title.replace('-', ' ')}
 
-* Brief Summary
+*Date:* {timestamp}
+*Source:* {video_url}
+
+** Brief Summary
 {summaries['brief']}
 
-* Medium Summary
+** Medium Summary
 {summaries['medium']}
 
-* Detailed Summary
+** Detailed Summary
 {summaries['detailed']}
 
-* Cost Information
-{self.get_cost_summary()}
+** Full Transcript
+{formatted_transcript}
 
-* Transcript
+** Cost Information
+{self.get_cost_summary()}
 """
-        
-        for entry in grouped_transcript:
-            timestamp_url = self.create_youtube_timestamp_url(video_url, entry['start'])
-            readable_time = self.format_timestamp_for_org(entry['start'])
-            output += f"\n[{readable_time}]({timestamp_url}) {entry['text']}\n"
         
         return output
 
-    def format_timestamp_for_org(self, seconds: float) -> str:
-        """Format timestamp for Org mode."""
-        total_seconds = int(seconds)
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        secs = total_seconds % 60
-        
-        if hours > 0:
-            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-        else:
-            return f"{minutes:02d}:{secs:02d}"
+
     
     def process_video(self, video_url: str) -> str:
         """Main processing function."""
@@ -773,18 +737,13 @@ DETAILED: [detailed summary with clear organization]"""
             video_title = self.get_video_title(video_url)
             self._stop_progress_timer()
             
-            # Chunk transcript for processing
-            chunks = self.chunk_transcript(transcript)
-            cleaned_chunks = []
+            # Extract transcript text
+            transcript_text = self.extract_transcript_text(transcript)
             
-            print(f"Processing transcript in {len(chunks)} chunks...")
-            for i, chunk in enumerate(chunks):
-                self._start_progress_timer(f"Processing chunk {i+1}/{len(chunks)}")
-                cleaned_text = self.clean_transcript_chunk(chunk, video_title)
-                self._stop_progress_timer()
-                cleaned_chunks.append(cleaned_text)
-            
-            clean_transcript = " ".join(cleaned_chunks)
+            # Clean the entire transcript at once
+            self._start_progress_timer("Cleaning transcript")
+            clean_transcript = self.clean_transcript(transcript_text, video_title)
+            self._stop_progress_timer()
             
             # Generate summaries
             self._start_progress_timer("Generating summaries")
@@ -792,7 +751,7 @@ DETAILED: [detailed summary with clear organization]"""
             self._stop_progress_timer()
             
             # Format output
-            formatted_output = self.format_output(video_url, transcript, clean_transcript, summaries)
+            formatted_output = self.format_output(video_url, clean_transcript, summaries, transcript)
             
             # Print cost summary to console
             print(f"\n{self.get_cost_summary()}")
@@ -864,19 +823,19 @@ def main():
         detailed_content = []
         
         for line in lines:
-            if line.strip() == "* Brief Summary":
+            if line.strip() == "** Brief Summary":
                 in_brief = True
                 in_medium = in_detailed = False
                 continue
-            elif line.strip() == "* Medium Summary":
+            elif line.strip() == "** Medium Summary":
                 in_medium = True
                 in_brief = in_detailed = False
                 continue
-            elif line.strip() == "* Detailed Summary":
+            elif line.strip() == "** Detailed Summary":
                 in_detailed = True
                 in_brief = in_medium = False
                 continue
-            elif line.strip().startswith("* "):
+            elif line.strip().startswith("** "):
                 in_brief = in_medium = in_detailed = False
                 continue
             
