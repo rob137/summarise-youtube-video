@@ -2,8 +2,14 @@
 
 ## Build/Test/Lint Commands
 - **Run main script**: `./summarise-video <youtube_url>`
-- **Install dependencies**: `pip install -r requirements.txt`  
+- **Install dependencies**: `pip install -r requirements.txt` or `make install`
 - **Check syntax**: `python3 -m py_compile summarise-video`
+- **Format code**: `black summarise-video` or `make format`
+- **Lint code**: `ruff check summarise-video` or `make lint`
+- **Type check**: `mypy summarise-video` or `make typecheck`
+- **If dependencies are missing**, run `make install` to fetch them
+- **Aggregate**: `make check` runs formatting, linting, type checking and syntax
+  compilation
 - **No formal tests**: No test suite exists; functionality tested via execution
 - **Environment**: Requires `GEMINI_API_KEY` in `.env` or environment
 
