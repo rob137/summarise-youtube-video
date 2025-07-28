@@ -1,6 +1,12 @@
 # YouTube Transcript Extractor
 
-A command-line tool to extract YouTube video transcripts and copy them to the clipboard.
+Takes a YouTube URL and copies an AI-generated summary to your clipboard.
+
+## Usage
+
+```bash
+./yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID"
+```
 
 ## Features
 
