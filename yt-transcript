@@ -1,0 +1,90 @@
+#!/usr/bin/env /usr/bin/python3
+import sys
+import re
+import requests
+import os
+sys.path.insert(0, '/Users/robertkirby/Library/Python/3.9/lib/python/site-packages')
+
+import pyperclip
+import google.generativeai as genai
+from youtube_transcript_api import YouTubeTranscriptApi
+
+def extract_video_id(url):
+    match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', url)
+    return match.group(1) if match else None
+
+def get_video_title(video_id):
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        response = requests.get(url)
+        response.raise_for_status()
+        
+        # Extract title from HTML
+        title_match = re.search(r'<title>([^<]+)</title>', response.text)
+        if title_match:
+            title = title_match.group(1)
+            # Remove " - YouTube" suffix if present
+            title = re.sub(r' - YouTube$', '', title)
+            return title
+        return f"YouTube Video {video_id}"
+    except Exception:
+        return f"YouTube Video {video_id}"
+
+def get_gemini_summary(title, transcript):
+    try:
+        # Configure Gemini
+        api_key = os.getenv('GEMINI_API_KEY')
+        if not api_key:
+            raise Exception("GEMINI_API_KEY environment variable not found")
+        
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Create prompt
+        prompt = f"{title}\n\n{transcript}\n\nKey takeaways as bullets, plain English."
+        
+        # Generate response
+        response = model.generate_content(prompt)
+        return response.text
+        
+    except Exception as e:
+        print(f"⚠️  Failed to get AI summary: {e}")
+        print("📋 Copying raw transcript + prompt instead...")
+        return f"{title}\n\n{transcript}\n\nKey takeaways as bullets, plain English."
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: yt-transcript <youtube_url>")
+        sys.exit(1)
+    
+    url = sys.argv[1]
+    video_id = extract_video_id(url)
+    
+    if not video_id:
+        print("❌ Could not extract video ID")
+        sys.exit(1)
+    
+    try:
+        # Get title
+        print("📺 Getting video title...")
+        title = get_video_title(video_id)
+        
+        # Get transcript
+        print("📝 Fetching transcript...")
+        api = YouTubeTranscriptApi()
+        transcript = api.fetch(video_id)
+        transcript_text = ' '.join(item.text for item in transcript)
+        
+        # Get AI summary
+        print("🤖 Generating summary...")
+        summary = get_gemini_summary(title, transcript_text)
+        
+        pyperclip.copy(summary)
+        print(f"✅ AI summary copied to clipboard!")
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
