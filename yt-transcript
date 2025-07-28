@@ -38,7 +38,7 @@ def get_gemini_summary(title, transcript):
             raise Exception("GEMINI_API_KEY environment variable not found")
         
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-pro')
         
         # Create prompt
         prompt = f"{title}\n\n{transcript}\n\nKey takeaways as bullets, plain English."
